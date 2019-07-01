@@ -73,10 +73,10 @@ sub process_then_block {
     my $outfile = $self->{parent}->{engine}->get_full_output_path($file, $lang);
     ($_, my $outpath, $_) = fileparse($outfile); # this way $outpath will include the trailing delimiter
 
-    foreach my $command (@{$block->{command}}) {
+    foreach my $command_str (@{$block->{command}}) {
         # substitute %FILE% and target language-based macros
         # with the full path to the saved file
-        $command = subst_macros($command, $file, $lang);
+        my $command = subst_macros($command_str, $file, $lang);
 
         # substitute %OUTFILE% macro with the full path to the saved file
         $command =~ s/%OUTFILE%/$outfile/sg;
