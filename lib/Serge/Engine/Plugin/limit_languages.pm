@@ -313,8 +313,9 @@ sub process_block {
             if ($then->{include_matched_languages}) {
                 _include_languages($target_languages, \@matched_languages);
             }
-
+            
             if ($then->{exclude_matched_languages}) {
+                _include_languages($target_languages, $self->{parent}->{original_destination_languages});
                 _exclude_languages($target_languages, \@matched_languages);
             }
         }
