@@ -6,12 +6,38 @@ use parent Serge::Plugin::Base::Callback;
 use strict;
 use warnings;
 
-use Serge::Util qw(generate_hash is_flag_set set_flags);
+use Serge::Util qw(generate_hash is_flag_set set_flags subst_macros_strref);
 
 our $SEED_WITH_STRING = undef; # default `seed_with_string` value
 our $STRING_FORMAT = '%HASH%'; # default `string_format` value
 our $HINT_FORMAT = '%HASH%'; # default `hint_format` value
 our $LANG = 'keys'; # default `language` value
+
+my $PREVIEW_FORMAT = 'preview';
+
+#    Preview mode generates special invisible markers around the text
+#    That embed a hex-encoded key string together with the original
+#    text. For invisible symbols, a Tags Unicode block is used:
+#    https://en.wikipedia.org/wiki/Tags_(Unicode_block)
+#
+#    Hex characters mapping:
+#        e0020 = letter 0
+#        e0021 = letter 1
+#        ...
+#        e002e = letter e
+#        e002f = letter f
+#    Markers:
+#        e0030 = key start marker
+#        e0031 = text start marker
+#        e0032 = text end marker
+#
+#    Example:
+#        Text 'Foo' with key '91cc8' would be written as:
+#
+#        <key start marker><letter 9><letter 1><letter c><letter c><letter 8><text start marker>Foo<text end marker>
+#        I.e. as follows:
+#        <0xe0030><0xe0029><0xe0021><0xe002c><0xe002c><0xe0028><0xe0031>Foo<0xe0032>
+
 
 sub name {
     return 'Language translation provider which generates unique string keys as translation values';
@@ -28,10 +54,7 @@ sub init {
         seed              => 'STRING',
         seed_with_string  => 'BOOLEAN',
         string_format     => 'STRING',
-        hint_format       => 'STRING',
-        translations => {
-            '*'           => 'STRING'
-        }
+        hint_format       => 'STRING'
     });
 
     $self->add({
@@ -54,12 +77,12 @@ sub validate_data {
     $self->{hint_format} = exists $d->{hint_format} ? $d->{hint_format} : $HINT_FORMAT;
     $self->{seed_with_string} = exists $d->{seed_with_string} ? $d->{seed_with_string} : $SEED_WITH_STRING;
 
-    if ($self->{string_format} !~ m/%HASH%/) {
-        die "`format` parameter value must have a %HASH% macro"
+    if ($self->{string_format} !~ m/%HASH%/ && $self->{string_format} ne $PREVIEW_FORMAT) {
+        die "`string_format` parameter value must have a %HASH% macro or be set to '$PREVIEW_FORMAT'"
     }
 
     if ($self->{hint_format} !~ m/%HASH%/) {
-        die "`format` parameter value must have a %HASH% macro"
+        die "`hint_format` parameter value must have a %HASH% macro"
     }
 }
 
@@ -88,7 +111,12 @@ sub is_keys_language {
 sub generate_raw_key {
     my ($self, $namespace, $filepath, $source_key, $string, $context) = @_;
 
+    # add initial seed, namespace and filepath as base disambiguation
+    # factors, so that keys in all namespaces / files are different;
+    # having an initial seed allows to control key uniqueness across
+    # multiple Serge databases
     my @a = ($self->{data}->{seed}, $namespace, $filepath);
+
     if (defined $source_key && $source_key ne '') {
         # when source key is defined, use it as a string identifier
         push @a, $source_key;
@@ -111,6 +139,9 @@ sub add_hint {
 
     my $hash = $self->generate_raw_key($namespace, $filepath, $source_key, $string, $context);
     my $hint = $self->{hint_format};
+
+    subst_macros_strref(\$hint, $filepath, $lang);
+
     $hint =~ s/%HASH%/$hash/sg;
 
     push @$aref, $hint;
@@ -121,18 +152,27 @@ sub get_translation {
 
     return () unless $self->is_keys_language($lang);
     my $hash = $self->generate_raw_key($namespace, $filepath, $source_key, $string, $context);
-    my $key = $self->{string_format};
-    $key =~ s/%HASH%/$hash/sg;
 
-    return ($key, undef, undef, $self->{data}->{save_translations}) if $self->is_keys_language($lang);
+    my $out;
+    if ($self->{string_format} eq $PREVIEW_FORMAT) {
+        $out = $hash;
+        $out =~ s/([0-9a-f])/chr(0x0e0020 + hex($1))/ige;
+        $out = "\x{e0030}$out\x{e0031}$string\x{e0032}";
+    } else {
+        $out = $self->{string_format};
+        $out =~ s/%HASH%/$hash/sg;
+    }
+
+    return ($out, undef, undef, $self->{data}->{save_translations}) if $self->is_keys_language($lang);
     return (); # otherwise, return an empty array
 }
 
 sub can_process_ts_file {
     my ($self, $phase, $file, $lang) = @_;
 
-    # if this is a key language, do not import anything from translation file unless `save_translations' flag is on
-    return 0 if $self->is_keys_language($lang) && !$self->{data}->{save_translations};
+    # if this is a keys language, do not generate or process translation files:
+    # keys are not meant to be modified externally
+    return 0 if $self->is_keys_language($lang);
 
     # by default, allow to process any translation files for any given target language
     return 1;

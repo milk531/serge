@@ -5,7 +5,9 @@ use parent Serge::Interface::PluginHost;
 use strict;
 
 use File::Path;
+use JSON::Streaming::Reader;
 use JSON -support_by_pp; # -support_by_pp is used to make Perl on Mac happy
+use Tie::IxHash;
 use Serge::Mail;
 use Serge::Util qw(xml_escape_strref);
 
@@ -24,6 +26,8 @@ sub init {
         path_matches      => 'ARRAY',
         path_doesnt_match => 'ARRAY',
         path_html         => 'ARRAY',
+        jsonp             => 'BOOLEAN',
+        streaming_mode    => 'BOOLEAN',
 
         email_from        => 'STRING',
         email_to          => 'ARRAY',
@@ -112,6 +116,101 @@ $text
 
 }
 
+sub parse_json_as_stream {
+    my ($self, $textref) = @_;
+
+    my $jsonr = JSON::Streaming::Reader->for_string($textref);
+    my $root = {};
+    tie(%$root, 'Tie::IxHash');
+    my $node = $root;
+    my $prop;
+    my $value;
+    my $error;
+    my @stack = ();
+    $jsonr->process_tokens(
+        start_property => sub {
+            my ($name) = @_;
+            $prop = $name;
+            $value = undef;
+        },
+
+        start_object => sub {
+            $value = {};
+            tie(%$value, 'Tie::IxHash');
+            if (ref $node eq 'HASH') {
+                $node->{$prop} = $value;
+            }
+            if (ref $node eq 'ARRAY') {
+                push @$node, $value;
+            }
+            push @stack, $node;
+            $node = $value;
+            $value = undef;
+        },
+
+        end_object => sub {
+            $node = pop @stack;
+        },
+
+        start_array => sub {
+            $value = [];
+            if (ref $node eq 'HASH') {
+                $node->{$prop} = $value;
+            }
+            if (ref $node eq 'ARRAY') {
+                push @$node, $value;
+            }
+            push @stack, $node;
+            $node = $value;
+            $value = undef;
+        },
+
+        end_array => sub {
+            $node = pop @stack;
+        },
+
+        add_string => sub {
+            my ($s) = @_;
+            $value .= $s;
+        },
+
+        add_number => sub {
+            my ($n) = @_;
+            $value = $n;
+        },
+
+        add_boolean => sub {
+            my ($b) = @_;
+            $value = $b ? JSON::true : JSON::false;
+        },
+
+        add_null => sub {
+            $value = JSON::null;
+        },
+
+        end_property => sub {
+            if (ref $node eq 'HASH' && defined $prop) {
+                $node->{$prop} = $value;
+                $prop = undef;
+            }
+            if (ref $node eq 'ARRAY') {
+                push @$node, $value;
+            }
+            $value = undef;
+        },
+
+        error => sub {
+            ($error) = @_;
+        },
+    );
+
+    if (defined $error) {
+        return (undef, $error);
+    }
+
+    return $root->{''};
+}
+
 sub parse {
     my ($self, $textref, $callbackref, $lang) = @_;
 
@@ -120,20 +219,35 @@ sub parse {
     # Make a copy of the string as we will change it
 
     my $text = $$textref;
+    my $jsonp_prefix = '';
+    my $jsonp_suffix = '';
+
+    if ($self->{data}->{jsonp} && $text =~ m/^(.*?)(\{.*\})(.*?)$/s) {
+        $jsonp_prefix = $1;
+        $text = $2;
+        $jsonp_suffix = $3;
+    }
 
     # Parse JSON
 
-    my $tree;
-    eval {
-        ($tree) = from_json($text, {relaxed => 1});
-    };
-    if ($@ || !$tree) {
-        my $error_text = $@;
+    my ($tree, $error_text);
+    if ($self->{data}->{streaming_mode}) {
+        ($tree, $error_text) = $self->parse_json_as_stream(\$text);
+    } else {
+        eval {
+            ($tree) = from_json($text, {relaxed => 1});
+        };
+        if ($@ || !$tree) {
+            $error_text = $@;
+        }
+    }
+
+    if (!$tree) {
         if ($error_text) {
             $error_text =~ s/\t/ /g;
             $error_text =~ s/^\s+//s;
         } else {
-            $error_text = "from_json() returned empty data structure";
+            $error_text = "parser returned an empty data structure";
         }
 
         $self->{errors}->{$self->{parent}->{engine}->{current_file_rel}} = $error_text;
@@ -145,12 +259,26 @@ sub parse {
 
     $self->process_node('', $tree, $callbackref, $lang);
 
+    return undef unless $lang; # if in source parsing mode, return nothing
+
     # Reconstruct JSON
 
     # need to force indent_length, otherwise it will be zero when PP extension 'escape_slash' is used
     # (looks like an issue in some newer version of JSON:PP)
-    # also, force 'canonical' to sort keys alphabetically to ensure the structure won't be changed on subsequent script runs
-    return $lang ? to_json($tree, {pretty => 1, indent_length => 3, canonical => 1, escape_slash => 1}) : undef;
+    # also, when not in the streaming mode, force 'canonical' option to sort keys alphabetically
+    # to ensure the structure won't be changed on subsequent script runs
+    my $json = to_json($tree, {
+        pretty => 1,
+        indent_length => 3,
+        canonical => !$self->{data}->{streaming_mode},
+        escape_slash => 1
+    });
+
+    if ($self->{data}->{jsonp}) {
+        chomp $json;
+        return $jsonp_prefix.$json.$jsonp_suffix;
+    }
+    return $json;
 }
 
 sub process_node {
@@ -159,7 +287,8 @@ sub process_node {
     if (ref($subtree) eq 'HASH') {
         # hash
 
-        foreach my $key (sort keys %$subtree) {
+        my @keys = $self->{data}->{streaming_mode} ? keys %$subtree : sort keys %$subtree;
+        foreach my $key (@keys) {
             $self->process_node($path.'/'.$key, $subtree->{$key}, $callbackref, $lang, $subtree, $key);
         }
     } elsif (ref($subtree) eq 'ARRAY') {
@@ -173,6 +302,18 @@ sub process_node {
         }
 
     } else {
+        # restore boolean scalars
+
+        if (JSON::is_bool($subtree)) {
+            my $val = $subtree ? JSON::true : JSON::false;
+            if (defined $index) {
+                $parent->[$index] = $val;
+            } else {
+                $parent->{$key} = $val;
+            }
+            return;
+        }
+
         # text
         return unless $self->check_path($path);
 
@@ -199,14 +340,15 @@ sub process_node {
             # (parse_php_xhtml or the one specified in html_parser config node)
             if (!$self->{html_parser}) {
                 if (exists $self->{data}->{html_parser}) {
+                    # if there's a `html_parser` config node, use it to initialize the plugin
                     $self->{html_parser} = $self->load_plugin_from_node(
                         'Serge::Engine::Plugin', $self->{data}->{html_parser}
                     );
                 } else {
-                    # fallback to loading parse_php_xhtml with default parameters
-                    eval('use Serge::Engine::Plugin::parse_php_xhtml; $self->{html_parser} = Serge::Engine::Plugin::parse_php_xhtml->new($self->{parent});');
-                    ($@) && die "Can't load parser plugin 'parse_php_xhtml': $@";
-                    print "Loaded HTML parser plugin for HTML nodes\n" if $self->{parent}->{debug};
+                    # otherwise, fall back to loading parse_php_xhtml plugin with default parameters
+                    $self->{html_parser} = $self->load_plugin(
+                        'Serge::Engine::Plugin::parse_php_xhtml', {}
+                    );
                 }
             }
 

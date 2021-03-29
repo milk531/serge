@@ -1,6 +1,96 @@
 Revision history
 
-1.4     Pending release
+Pending release
+
+        - Fixed `parse_ts` plugin to output strict XML by escaping `>`.
+
+        - Fixed `parse_js` plugin escaped forward slash handling (#108).
+          The plugin now also supports quote-less key names, key names
+          and values with single-quote string syntax (#118), and template
+          literals (i.e. strings wrapped with backticks).
+
+        - Fixed `parse_rc` plugin resource ID extraction.
+
+        - `parse_strings` plugin now supports multi-line strings,
+          as well as \r, \t, and \UXXXX escape sequences.
+
+        - `parse_php_xhtml` plugin now allows to fine-tune the list of tags
+          processed by default (#120).
+
+        - `parse_yaml` parser now supports arrays, and also skips
+          over boolean values.
+
+        - Added `parse_locjson` plugin to parse monolingual LocJSON files
+          (see https://github.com/iafan/LocJSON).
+
+        - Word wrapping functionality improved for .PO files;
+          lines will never go beyond the defined maximum length.
+
+        - `parse_resx` plugin now exports keys explicitly
+          (in addition to extracting them as translation hints).
+          Localized ResX files now also no longer contain
+          XML comments (this allows to exclude commented out keys).
+
+        - Added `lib` plugin to allow to use plugins (Perl modules)
+          from custom folders.
+
+        - Added `placeholder` plugin to replace placeholder-like sequences
+          and tags with simplified uniform placeholders like <1>, <2>, ...
+
+        - Added `before_parsing_source_file` callback that is run
+          before the file is parsed, and only when the source file
+          has been modified, thus enabling optimized preprocessing
+          scenarios.
+
+        - Added `rclone` VCS sync plugin that wraps the functionality
+          of Rclone (https://rclone.org/) and allows to use
+          `serge pull` and `serge push` to pull and push changes
+          from various cloud storage providers.
+
+        - `keys_language` plugin now supports the 'preview' output format
+          that generates invisible markers around the source text,
+          so that the target document text is both readable and ready
+          to be used for in-context preview scenarios.
+
+        - When MySQL database is used as a backend, `utf8mb4`
+          encoding is now forced for the connection.
+
+        - Added support for JSONP mode in the `parse_json` parser.
+
+        - Added support for streaming mode in the `parse_json` parser.
+          This mode allows to preserve original key ordering inside JSON.
+
+        - Fixed `clean-ts` parser to understand different language macros
+          in `ts_file_path` parameter, not just %LOCALE%.
+
+        - Made `$calculate_params` config parameter optional in `fbcgen` tool.
+
+        - `serge import` now by default skips translations that are identical
+          to source. A new flag, `--force-same`, was introduced to force
+          the old behavior where such translations would be imported.
+
+        - A new `smartcat_v2` synchronization plugin was added for Smartcat
+          localization platform.
+
+        - Added support for `callback_context` parameter in `rewrite_source`
+          and `rewrite_translation` callbacks for plugins to be able to share
+          data between subsequent calls.
+
+        - Added `comment_attrs` property for `parse_xml` parser to allow for
+          easy comment extraction from a set of attributes of a wrapper node.
+
+        - `serge clean-ts` now can accept `--ts-dir=path` (or
+          `--ts-dirs=path,path2,...`) parameters. The parameters allow one
+          to explicitly specify a list of directories to scan and clean.
+
+        - `parse_rc` parser now supports L-strings and escape codes.
+
+        - `replace_strings` plugin now supports newly added `rewrite_context`,
+          `rewrite_hint` and `rewrite_key` callbacks.
+
+        - Added support for UTF-8 filenames under Unix.
+
+1.4     July 30, 2019
 
         - Support `--lang` parameter in `serge pull-ts` and `serge push-ts`
           (gives an ability to specify one or more languages which should be
@@ -88,6 +178,43 @@ Revision history
           translation interchange files.
 
         - Split `pootle` and `zing` translation plugins for better clarity.
+
+        - Git sync plugin now supports 'fetch_params',
+          `commit_params` and `push_params` configuration parameters
+          in addition to a previously existed `clone_params`. This
+          allows one to pass extra parameters to `git` during different
+          stages of its work. This is useful for e.g. shallow cloning
+          and fetching, or for bypassing commit and push hooks.
+
+        - Improved `transform` plugin logic to make trailing punctuation
+          detection more smart when it is combined with wrapper tags.
+          It also deals better with whitespace, reducing the list of
+          candidates to guess transformations for.
+
+        - `transform` plugin now always returns guessed translations as fuzzy;
+          its previous configuration parameters (`as_fuzzy_default`,
+          `as_fuzzy` and `as_not_fuzzy`) are now deprecated. You will see
+          a corresponding notice in the command line output if you still
+          have these parameters in your configuration file.
+
+        - Fixed a bug where `reuse_orphaned` job parameter would not be passed down
+          to the code that expected it, which resulted in not reusing orphaned
+          translations in the `transform` plugin.
+
+        - Refactored `feature_branch` plugin to more accurately reuse
+          master branch translations in dependent branches.
+          This required to selectively disable optimizations when localizing
+          master files, so handling localization with `feature_branch`
+          might become a bit slower.
+
+        - `parse_keyvalue` plugin now exports keys explicitly
+          (in addition to extracting them as translation hints).
+
+        - Added support for `use_keys_as_context` job parameter (#89).
+
+        - Added new `show` command to display expanded .serge configurations (#40).
+
+        - Miscellaneous smaller fixes and improvements.
 
 1.3     February 1, 2018
 
@@ -300,6 +427,10 @@ Revision history
 
         - Fixed %LOCALE:LC% and %LOCALE:UC% macros that would be affected by
           iOS-specific language remappings (e.g. pt and pt-br).
+
+        - Added new `serge show <config>` command to expand the @inherit
+          rules in the configuration file and render the nicely formatted
+          final config structure.
 
         - Fixed typos in embedded documentation
 

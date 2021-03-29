@@ -140,9 +140,28 @@ sub parse_localized_files_for_file_lang {
     $self->clear_disambiguation_cache();
 
     # Parsing the file
+
+    # if there's a segmentation callback plugin enabled, use a segmentation-aware
+    # callback; otherwise, use a regular one, so that it won't have to check
+    # for segmentation for each extracted unit
+
+    my $callback_sub = sub {
+        my ($orig_self, @params) = @_;
+        $orig_self->parse_localized_file_callback(@params);
+    };
+    if ($self->{job}->has_callbacks('segment_source')) {
+        $callback_sub = sub {
+            my ($orig_self, @params) = @_;
+            $orig_self->segmentation_wrapper_callback(sub {
+                my ($orig_self, @params) = @_;
+                $orig_self->parse_localized_file_callback(@params);
+            }, @params);
+        };
+    }
+
     eval {
         $self->{job}->{parser_object}->{import_mode} = 1;
-        $self->{job}->{parser_object}->parse(\$src, sub { $self->parse_localized_file_callback(@_) }, $lang);
+        $self->{job}->{parser_object}->parse(\$src, sub { &$callback_sub($self, @_) }, $lang);
     };
 
     if ($@) {
@@ -219,7 +238,21 @@ sub parse_source_file_callback {
 
     my $item_id;
     if ($self->{dry_run}) {
+        # Normalize parameters
         $string = NFC($string) if ($string =~ m/[^\x00-\x7F]/);
+        $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+        $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
+
+        my $callback_context = {};
+        $self->run_callbacks('rewrite_hint', $self->{current_file_rel}, $lang, \$hint);
+        $self->run_callbacks('rewrite_source', $self->{current_file_rel}, $lang, \$string, \$hint);
+        $self->run_callbacks('rewrite_key', $self->{current_file_rel}, $lang, \$key, \$hint);
+
+        # Normalize once again, in case the string was changed.
+        $string = NFC($string) if ($string =~ m/[^\x00-\x7F]/);
+        $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+        $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
+
     } else {
         $item_id = Serge::Engine::parse_source_file_callback(@_);
     }
@@ -231,7 +264,18 @@ sub parse_localized_file_callback {
 
     # Normalize parameters
 
+    $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
     $translation = NFC($translation) if ($translation =~ m/[^\x00-\x7F]/);
+    $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
+
+    $self->run_callbacks('rewrite_hint', $self->{current_file_rel}, $lang, \$hint);
+    $self->run_callbacks('rewrite_source', $self->{current_file_rel}, $lang, \$translation, \$hint);
+    $self->run_callbacks('rewrite_key', $self->{current_file_rel}, $lang, \$key, \$hint);
+
+    # Normalize once again, in case the string was changed.
+    $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+    $translation = NFC($translation) if ($translation =~ m/[^\x00-\x7F]/);
+    $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
 
     my $keys = $self->{job}->{localized_keys};
 
@@ -321,7 +365,11 @@ sub parse_localized_file_callback {
         return;
     }
 
-    if ($data->{string} ne $translation) {
+    print "\t\t\t::localized file [$lang]: '$key' => '$translation'\n" if $self->{debug};
+
+    my $is_same = $data->{string} eq $translation;
+
+    if (!$is_same) {
         if ($self->{save_report}) {
             push @{$self->{current_report_key}}, {
                 key => $key,
@@ -331,7 +379,13 @@ sub parse_localized_file_callback {
             };
         }
     } else {
-        $self->_notice("Translation is the same as the source for key '$key'", "\t\t\t");
+        my $status;
+        if ($self->{force_same}) {
+           $status = 'will be imported because of --force-same flag';
+        } else {
+           $status = 'skipping';
+        }
+        $self->_notice("Translation is the same as the source for key '$key', $status", "\t\t\t");
         if ($self->{save_report}) {
             push @{$self->{current_report_key}}, {
                 key => $key,
@@ -344,9 +398,9 @@ sub parse_localized_file_callback {
         }
     }
 
-    print "\t\t\t::localized file [$lang]: '$key' => '$translation'\n" if $self->{debug};
-
-    $self->{db}->set_translation($item_id, $lang, $translation, undef, undef, 0) unless $self->{dry_run};
+    if (!$is_same || $self->{force_same}) {
+        $self->{db}->set_translation($item_id, $lang, $translation, undef, undef, 0) unless $self->{dry_run};
+    }
 
     return $translation;
 }

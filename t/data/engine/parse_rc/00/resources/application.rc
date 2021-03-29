@@ -37,6 +37,8 @@ BEGIN
     IDS_TEST_1 "Value 1"
     IDS_TEST_2 "Value 2"
     IDS_ERROR  "Error %s"
+    IDS_CURRENCY L"Euro (\x20AC)"
+    IDS_ANGLE  L"180\x00B0"
 END
 
 STRINGTABLE
@@ -44,4 +46,18 @@ BEGIN
     IDS_TEST_3
                             "Value 3"
     IDS_TEST_4              "Value 4"
+END
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// Test Dialog
+//
+
+IDD_MSGBOX_DLG DIALOGEX 0, 0, 279, 95
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "My Application"
+FONT 8, "Tahoma", 0, 0, 0x0
+BEGIN
+    LTEXT "Sample text",IDC_MSGBOX_HEADER,0,0,279,20
+    PUSHBUTTON      "OK",IDC_MSGBOX_BTTN,220,74,52,14
 END

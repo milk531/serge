@@ -320,6 +320,13 @@ sub init_job {
 
     # preserve the original list for future reference
     $job->{original_destination_languages} = $job->{destination_languages};
+
+    map {
+        $self->{job}->{$_} = remove_blank_entries(
+            $self->{job}->{$_},
+            "WARNING: $_ config parameter should have no empty regular expressions"
+        );
+    } qw(source_match source_exclude source_exclude_dirs);
 }
 
 sub process_job {
@@ -701,10 +708,34 @@ sub parse_source_file {
 
     $self->clear_disambiguation_cache;
 
+    # Run the callback before parsing the file; it is not expected for
+    # the callback to modify the file, as this callback is run after the hash
+    # is calculated, and only if the source file has changed (or if in the forced mode).
+
+    $self->run_callbacks('before_parsing_source_file', $self->{current_file_rel}, \$src);
+
     # Parsing the file
 
+    # if there's a segmentation callback plugin enabled, use a segmentation-aware
+    # callback; otherwise, use a regular one, so that it won't have to check
+    # for segmentation for each extracted unit
+
+    my $callback_sub = sub {
+        my ($orig_self, @params) = @_;
+        $orig_self->parse_source_file_callback(@params);
+    };
+    if ($self->{job}->has_callbacks('segment_source')) {
+        $callback_sub = sub {
+            my ($orig_self, @params) = @_;
+            $orig_self->segmentation_wrapper_callback(sub {
+                my ($orig_self, @params) = @_;
+                $orig_self->parse_source_file_callback(@params);
+            }, @params);
+        };
+    }
+
     eval {
-        $self->{job}->{parser_object}->parse(\$src, sub { $self->parse_source_file_callback(@_) });
+        $self->{job}->{parser_object}->parse(\$src, sub { &$callback_sub($self, @_) });
     };
 
     if ($@) {
@@ -773,6 +804,14 @@ sub disambiguate_string {
         $self->{current_file_source_keys}->{$source_key} = 1;
     }
 
+    # if job's `use_keys_as_context` option is turned on,
+    # and the context has not been provided explicitly,
+    # copy the key into the context before disambiguating
+
+    if ($context eq '' && $self->{job}->{use_keys_as_context} && $source_key ne '') {
+        $context = $source_key;
+    }
+
     # see if the item was already found in this file and
     # alter context if necessary to disambiguate the string
 
@@ -807,6 +846,40 @@ sub disambiguate_string {
     return $context;
 }
 
+sub segmentation_wrapper_callback {
+    # $original_callback comes first (after $self), becuse the list of passed parameters
+    # can vary (for example, $key many not be passed back from a parser)
+    my ($self, $original_callback, $string, $context, $hint, $flagsref, $lang, $key) = @_;
+
+    # if segment_source callback returns any scalar value,
+    # it will be auto-converted to a one-item array, which will mean
+    # no segmentation is necessary
+    my @a = $self->run_callbacks('segment_source', $string);
+
+    # if no segmentation was performed (only one or zero segment is returned),
+    # run the regular callback with the original parameters;
+    # the originally returned segmentation value is discarded
+    if (scalar(@a) <= 1) {
+        return &$original_callback($self, $string, $context, $hint, $flagsref, $lang, $key);
+    }
+
+    # otherwise, run the regular callback for each returned segment
+    my $n = 0;
+    my $is_splitter = undef;
+    @a = map {
+        my $translation;
+        if (!$is_splitter) {
+            $n++;
+            $translation = &$original_callback($self, $_, $context, $hint, $flagsref, $lang, $key.':'.$n);
+        } else {
+            $translation = $_;
+        }
+        $is_splitter = !$is_splitter;
+        $translation; # return back into array
+    } @a;
+    return join('', @a);
+}
+
 sub parse_source_file_callback {
     my ($self, $string, $context, $hint, $flagsref, $lang, $key) = @_;
 
@@ -828,11 +901,20 @@ sub parse_source_file_callback {
     $string = NFC($string) if ($string =~ m/[^\x00-\x7F]/);
     $context = NFC($context) if ($context =~ m/[^\x00-\x7F]/);
     $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+    $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
 
+    # We don't need to pass a callback context here, since
+    # there's no `rewrite_translation` callback to pass it down to.
+    $self->run_callbacks('rewrite_hint', $self->{current_file_rel}, undef, \$hint);
     $self->run_callbacks('rewrite_source', $self->{current_file_rel}, undef, \$string, \$hint);
+    $self->run_callbacks('rewrite_context', $self->{current_file_rel}, undef, \$context, \$hint);
+    $self->run_callbacks('rewrite_key', $self->{current_file_rel}, undef, \$key, \$hint);
 
     # normalize once again, in case the string was changed
     $string = NFC($string) if ($string =~ m/[^\x00-\x7F]/);
+    $context = NFC($context) if ($context =~ m/[^\x00-\x7F]/);
+    $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+    $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
 
     $context = $self->disambiguate_string($string, $context, $key, $hint);
 
@@ -1472,9 +1554,27 @@ sub generate_localized_files_for_file_lang {
 
     $self->clear_disambiguation_cache;
 
+    # if there's a segmentation callback plugin enabled, use a segmentation-aware
+    # callback; otherwise, use a regular one, so that it won't have to check
+    # for segmentation for each extracted unit
+
+    my $callback_sub = sub {
+        my ($orig_self, @params) = @_;
+        $orig_self->generate_localized_files_for_file_lang_callback(@params);
+    };
+    if ($self->{job}->has_callbacks('segment_source')) {
+        $callback_sub = sub {
+            my ($orig_self, @params) = @_;
+            $orig_self->segmentation_wrapper_callback(sub {
+                my ($orig_self, @params) = @_;
+                $orig_self->generate_localized_files_for_file_lang_callback(@params);
+            }, @params);
+        };
+    }
+
     my $out;
     eval {
-        $out = $self->{job}->{parser_object}->parse(\$src, sub { $self->generate_localized_files_for_file_lang_callback(@_) }, $lang);
+        $out = $self->{job}->{parser_object}->parse(\$src, sub { &$callback_sub($self, @_) }, $lang);
     };
 
     if ($@) {
@@ -1578,11 +1678,19 @@ sub generate_localized_files_for_file_lang_callback {
     $string = NFC($string) if ($string =~ m/[^\x00-\x7F]/);
     $context = NFC($context) if ($context =~ m/[^\x00-\x7F]/);
     $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+    $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
 
-    $self->run_callbacks('rewrite_source', $self->{current_file_rel}, $lang, \$string, \$hint);
+    my $callback_context = {};
+    $self->run_callbacks('rewrite_hint', $self->{current_file_rel}, $lang, \$hint, $callback_context);
+    $self->run_callbacks('rewrite_source', $self->{current_file_rel}, $lang, \$string, \$hint, $callback_context);
+    $self->run_callbacks('rewrite_context', $self->{current_file_rel}, $lang, \$context, \$hint, $callback_context);
+    $self->run_callbacks('rewrite_key', $self->{current_file_rel}, $lang, \$key, \$hint, $callback_context);
 
     # normalize once again, in case the string was changed
     $string = NFC($string) if ($string =~ m/[^\x00-\x7F]/);
+    $context = NFC($context) if ($context =~ m/[^\x00-\x7F]/);
+    $hint = NFC($hint) if ($hint =~ m/[^\x00-\x7F]/);
+    $key = NFC($key) if ($key =~ m/[^\x00-\x7F]/);
 
     $context = $self->disambiguate_string($string, $context, $key, $hint);
 
@@ -1626,7 +1734,7 @@ sub generate_localized_files_for_file_lang_callback {
         $translation = $self->{job}->{leave_untranslated_blank} ? '' : $string;
     }
 
-    if (combine_or($self->run_callbacks('rewrite_translation', $self->{current_file_rel}, $lang, \$translation))) {
+    if (combine_or($self->run_callbacks('rewrite_translation', $self->{current_file_rel}, $lang, \$translation, $callback_context))) {
         # if any of the rewrite_translation plugins returned a true value, normalize the output
         $translation = '' if !defined $translation; # convert to a string for consistency
         $translation = NFC($translation);

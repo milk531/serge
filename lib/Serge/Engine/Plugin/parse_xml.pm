@@ -22,20 +22,22 @@ sub init {
     $self->{errors} = {};
 
     $self->merge_schema({
-        node_match    => 'ARRAY',
-        node_exclude  => 'ARRAY',
-        node_html     => 'ARRAY',
-        xml_kind      => 'STRING',
+        node_match      => 'ARRAY',
+        node_exclude    => 'ARRAY',
+        node_html       => 'ARRAY',
+        comment_attrs   => 'ARRAY',
+        autodetect_html => 'BOOLEAN',
+        xml_kind        => 'STRING',
 
-        email_from    => 'STRING',
-        email_to      => 'ARRAY',
-        email_subject => 'STRING',
+        email_from      => 'STRING',
+        email_to        => 'ARRAY',
+        email_subject   => 'STRING',
 
-        html_parser   => {
-            plugin    => 'STRING',
+        html_parser     => {
+            plugin      => 'STRING',
 
-            data      => {
-               '*'    => 'DATA',
+            data        => {
+               '*'      => 'DATA',
             }
         },
     });
@@ -134,10 +136,6 @@ sub parse {
 
     die 'node_match not specified' unless $self->{data}->{node_match};
 
-    my $node_match = $self->{data}->{node_match} || [];
-    my $node_exclude = $self->{data}->{node_exclude} || [];
-    my $node_html = $self->{data}->{node_html} || [];
-
     # Make a copy of the string as we will change it
 
     my $text = $$textref;
@@ -172,6 +170,7 @@ sub parse {
     # Create XML parser object
 
     use XML::Parser;
+    use XML::Parser::Style::IxTree;
     my $parser = new XML::Parser(Style => 'IxTree');
 
     # Parse XML
@@ -358,6 +357,17 @@ sub process_text_node {
     $trimmed =~ s/^\s+//sg;
     $trimmed =~ s/\s+$//sg;
 
+    # gather the comment attributes
+    my $comment_attrs = $self->{data}->{comment_attrs} || [];
+
+    my @comments = ($path);
+    foreach my $name (sort @$comment_attrs) {
+        if (exists $attrs->{$name}) {
+            push @comments, "$name = $attrs->{$name}";
+        }
+    }
+    my $comment = join("\n\n", @comments);
+
     # 1) skip empty strings
     # 2) skip strings consisting of non-alphabet characters (bullets, arrows, etc.)
     # 3) skip strings representing plain numbers
@@ -374,6 +384,11 @@ sub process_text_node {
         # unescape basic XML entities unless we're inside CDATA block
         xml_unescape_strref($strref) unless $cdata;
 
+        if ($self->{data}->{autodetect_html}) {
+            # auto-detect HTML by the opening tag
+            $is_html = 1 if $$strref =~ m/^</s;
+        }
+
         if ($is_html) {
             # if node is html, pass its text to html parser for string extraction
             # if html_parser fails to parse the XML due to errors,
@@ -383,14 +398,15 @@ sub process_text_node {
             # (parse_php_xhtml or the one specified in html_parser config node)
             if (!$self->{html_parser}) {
                 if (exists $self->{data}->{html_parser}) {
+                    # if there's a `html_parser` config node, use it to initialize the plugin
                     $self->{html_parser} = $self->load_plugin_from_node(
                         'Serge::Engine::Plugin', $self->{data}->{html_parser}
                     );
                 } else {
-                    # fallback to loading parse_php_xhtml with default parameters
-                    eval('use Serge::Engine::Plugin::parse_php_xhtml; $self->{html_parser} = Serge::Engine::Plugin::parse_php_xhtml->new($self->{parent});');
-                    ($@) && die "Can't load parser plugin 'parse_php_xhtml': $@";
-                    print "Loaded HTML parser plugin for HTML nodes\n" if $self->{parent}->{debug};
+                    # otherwise, fall back to loading parse_php_xhtml plugin with default parameters
+                    $self->{html_parser} = $self->load_plugin(
+                        'Serge::Engine::Plugin::parse_php_xhtml', {}
+                    );
                 }
             }
 
@@ -411,9 +427,9 @@ sub process_text_node {
             _android_unescape($strref) if ($self->{data}->{xml_kind_android});
 
             if ($lang) {
-                $$strref = &$callbackref($$strref, undef, $path, undef, $lang);
+                $$strref = &$callbackref($$strref, undef, $comment, undef, $lang);
             } else {
-                &$callbackref($$strref, undef, $path, undef, undef);
+                &$callbackref($$strref, undef, $comment, undef, undef);
             }
 
             # escape Android-specific stuff if requested
@@ -513,7 +529,7 @@ sub render_tag_recursively {
     foreach my $key (sort keys %$attrs) {
         my $str = $attrs->{$key};
 
-        my $tagpath = $path.'@'.$str;
+        my $tagpath = $path.'@'.$key;
 
         $self->process_text_node($tagpath, $attrs, \$str, $callbackref, $lang, undef, undef);
 

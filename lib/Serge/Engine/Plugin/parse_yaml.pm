@@ -9,6 +9,11 @@ use Serge::Mail;
 use Serge::Util qw(xml_escape_strref);
 use YAML::XS;
 
+# load boolean values as JSON::PP::Boolean objects
+# so that they can be skipped at translation time
+# and exported back as booleans
+$YAML::XS::Boolean = "JSON::PP";
+
 sub name {
     return 'Generic YAML tree parser plugin';
 }
@@ -144,6 +149,14 @@ sub parse {
     my $is_rails = $self->{data}->{yaml_kind} eq 'rails';
 
     if ($is_rails) {
+        if (ref($tree) ne 'HASH') {
+            my $error_text = "Rails YAML file should start with a root object; something else found";
+
+            $self->{errors}->{$self->{parent}->{engine}->{current_file_rel}} = $error_text;
+
+            die $error_text;
+        }
+
         my @tree_keys = keys %$tree;
         my $tree_count = @tree_keys;
         if ($tree_count == 0) {
@@ -183,13 +196,26 @@ sub parse {
 }
 
 sub process_node {
-    my ($self, $path, $subtree, $callbackref, $lang, $parent, $key) = @_;
+    my ($self, $path, $subtree, $callbackref, $lang, $parent, $key, $is_array) = @_;
+
+    # skip boolean values
+    if (ref $subtree eq 'JSON::PP::Boolean') {
+        return;
+    }
 
     if (ref($subtree) eq 'HASH') {
         # hash
 
         foreach my $key (sort keys %$subtree) {
-            $self->process_node($path.'/'.$key, $subtree->{$key}, $callbackref, $lang, $subtree, $key);
+            $self->process_node($path.'/'.$key, $subtree->{$key}, $callbackref, $lang, $subtree, $key, undef);
+        }
+    } elsif (ref($subtree) eq 'ARRAY') {
+        # array
+
+        my $n = 0;
+        foreach my $item (@$subtree) {
+            $self->process_node($path.'['.$n.']', $item, $callbackref, $lang, $subtree, $n, 1);
+            $n++;
         }
     } else {
         # text node
@@ -205,7 +231,11 @@ sub process_node {
         if (($string ne '') && ($string !~ '^__PRESERVE_(ANCHOR|REFERENCE)__')) {
             if ($lang) {
                 my $translated_string = &$callbackref($string, undef, $path, undef, $lang, $path);
-                $parent->{$key} = $translated_string;
+                if ($is_array) {
+                    $parent->[$key] = $translated_string;
+                } else {
+                    $parent->{$key} = $translated_string;
+                }
             } else {
                 &$callbackref($string, undef, $path, undef, undef, $path);
             }

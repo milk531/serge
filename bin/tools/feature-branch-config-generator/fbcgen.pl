@@ -70,6 +70,8 @@ if (!$config) {
 
 my $config_dir = dirname(rel2abs($config));
 chdir($config_dir); # expand paths based on the config location
+# See https://perldoc.perl.org/perl5260delta.html#Security
+unshift @INC, $config_dir;
 
 print "Loading config: $config\n";
 
@@ -284,7 +286,7 @@ foreach my $branch (@feature_branches) {
     $dir = 'branch-'.$dir;
     my $dir_padded = $dir . (' ' x ($width - length($branch)));
 
-    my $params = &$calculate_params($branch);
+    my $params = defined $calculate_params ? &$calculate_params($branch) : {};
     $params->{DIR} = $dir;
     $params->{DIR_PADDED} = $dir_padded;
     $params->{BRANCH} = $branch;
